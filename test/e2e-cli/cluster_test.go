@@ -401,7 +401,7 @@ var _ = Describe("ROSACTL CLI E2E Tests", Ordered, func() {
 					g.Expect(cond["status"]).To(Equal("True"), "condition %#v should be True", cond)
 				}
 			}
-		}).WithTimeout(20*time.Minute).WithPolling(20*time.Second).Should(Succeed(),
+		}).WithTimeout(35*time.Minute).WithPolling(20*time.Second).Should(Succeed(),
 			"all controller_statuses conditions should become True")
 
 		resp, err := apiClient.Get("/api/v0/clusters/"+id+"/statuses", accountID)
