@@ -620,7 +620,7 @@ var _ = Describe("ROSACTL CLI E2E Tests", Ordered, func() {
 		GinkgoWriter.Printf("Polling resource_bundles for NodePool readyCondition (cluster %s)\n", id)
 
 		Eventually(func(g Gomega) {
-			searchQuery := fmt.Sprintf("name like '%%%s%%'", id)
+			searchQuery := fmt.Sprintf("payload->'metadata'->'labels'->>'hyperfleet.io/cluster-id'='%s'", id)
 			resp, err := apiClient.Get("/api/v0/resource_bundles?search="+url.QueryEscape(searchQuery)+"&size=100", accountID)
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(resp.StatusCode).To(Equal(http.StatusOK))
