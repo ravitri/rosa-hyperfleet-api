@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-authz test-coverage test-e2e test-e2e-api test-e2e-cli test-e2e-platform-monitoring lint clean image image-push run generate generate-swagger help fmt vet
+.PHONY: build test test-unit test-authz test-coverage test-e2e test-e2e-api test-e2e-cli test-e2e-platform-monitoring test-e2e-zoa lint clean image image-push run generate generate-swagger help fmt vet
 
 BINARY_NAME := rosa-regional-platform-api
 IMAGE_REPO ?= quay.io/openshift-online/rosa-regional-platform-api
@@ -141,6 +141,11 @@ test-e2e-platform-monitoring:
 	E2E_RHOBS_API_URL="${RHOBS_API_URL}" \
 	ginkgo -vv --junit-report=junit-platform-monitoring.xml \
 	--output-dir=$(TEST_OUTPUT_DIR) ./test/e2e-platform-monitoring
+
+test-e2e-zoa:
+	E2E_BASE_URL="${BASE_URL}" E2E_ACCOUNT_ID="${E2E_ACCOUNT_ID}" \
+	ginkgo -vv --junit-report=junit-zoa.xml \
+	--output-dir=$(TEST_OUTPUT_DIR) ./test/e2e-zoa
 
 # Run just the AWS credentials check test
 test-e2e-awscreds:
