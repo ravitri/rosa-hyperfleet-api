@@ -7,7 +7,7 @@ This document describes the Cedar/AVP-based authorization service for the ROSA R
 The authorization service provides fine-grained access control for ROSA operations using:
 
 - **AWS IAM** for authentication (all requests carry AWS IAM credentials)
-- **Red Hat account tokens** provided optionally for Org Admin and OCM role verification
+- **Red Hat account tokens** provided optionally for Org Admin and RBAC role verification
 - **Amazon Verified Permissions (AVP)** for policy evaluation
 - **Cedar** as the policy language
 - **DynamoDB** for storing account linkage
@@ -22,9 +22,9 @@ flowchart TD
 
     B --> C{Is the AWS account<br/>linked to a RH org?}
 
-    C -->|No| D[If the request includes a RH token<br/>with Org Admin or an OCM role<br/>e.g. ROSAAdmin, the AWS account<br/>can be linked]
+    C -->|No| D[If the request includes a RH token<br/>with Org Admin or an RBAC role<br/>e.g. ROSAAdmin, the AWS account<br/>can be linked]
 
-    C -->|Yes| E{Is a RH token present<br/>with Org Admin or<br/>OCM role e.g. ROSAAdmin?}
+    C -->|Yes| E{Is a RH token present<br/>with Org Admin or<br/>RBAC role e.g. ROSAAdmin?}
     E -->|Yes| F[ALLOW<br/><i>Full administrative access<br/>within this AWS account</i>]
 
     E -->|No| G[Evaluate Cedar policies<br/>via Amazon Verified Permissions]
@@ -47,11 +47,11 @@ Extract Identity (AWS IAM credentials → principal ARN + AWS account)
 Account Linked Check
     |-- Is the AWS account linked to an RH org? → continue
     +-- Not linked → 403 "Account not linked"
-    |   (Linking requires an RH token with Org Admin or an OCM role such as ROSAAdmin)
+    |   (Linking requires an RH token with Org Admin or an RBAC role such as ROSAAdmin)
     |
 Admin Check (when RH token is present)
     |-- Is the RH token valid?
-    |-- Does the user hold Org Admin privileges or an OCM role (e.g. ROSAAdmin)?
+    |-- Does the user hold Org Admin privileges or an RBAC role (e.g. ROSAAdmin)?
     +-- All yes → ALLOW (full administrative access within this AWS account)
     |
 AVP Authorization
@@ -67,13 +67,13 @@ Handler
 **Administrative access** is granted when the request includes a valid Red Hat account token and the associated user holds either:
 
 - **Organization Administrator** privileges — global scope, applies to all regions.
-- An applicable **OCM role** such as `ROSAAdmin` — currently global scope; regional scoping is under evaluation.
+- An applicable **RBAC role** such as `ROSAAdmin` — currently global scope; regional scoping is under evaluation.
 
 Admin access grants full permissions within the linked AWS account, including policy and attachment management.
 
 **Regular IAM principals** — all other callers. Access is determined by Cedar policies evaluated via AVP, attached directly to the principal's ARN.
 
-> **Note:** Policy management is not restricted to administrative users. A regular IAM principal can be granted a Cedar policy that authorizes policy and attachment management (e.g., via a `ManagePolicies` action). This allows delegated policy administration without requiring an RH token or OCM role.
+> **Note:** Policy management is not restricted to administrative users. A regular IAM principal can be granted a Cedar policy that authorizes policy and attachment management (e.g., via a `ManagePolicies` action). This allows delegated policy administration without requiring an RH token or RBAC role.
 
 ## Tenancy and Scoping
 
@@ -83,7 +83,7 @@ All resources, policies, and attachments within the API are scoped to this bound
 
 | Scope | What |
 | --- | --- |
-| **Global** | AWS IAM identity, AWS account → RH org mapping, RH Org Admin status, OCM role assignments (regional scoping for OCM roles is under evaluation) |
+| **Global** | AWS IAM identity, AWS account → RH org mapping, RH Org Admin status, RBAC role assignments (regional scoping for RBAC roles is under evaluation) |
 | **Regional (per AWS account, per region)** | Cedar policies, policy attachments, policy stores, ROSA resources (clusters, node pools, access entries). Each region has its own independent policy store. A principal may have different permissions in different regions. |
 
 ## Policy Evaluation Semantics
@@ -101,6 +101,18 @@ When multiple policies are attached to a principal, all are evaluated together. 
 By default, newly linked AWS accounts grant **no permissions** to any IAM principal. Permissions must be explicitly granted through Cedar policies.
 
 Organization Administrators can attach managed policies to all IAM principals in the AWS account. For example, one available managed policy grants each principal permission to view all clusters in the AWS account and manage their own — reproducing the default behavior of the V1 API. Other managed policies will cover common patterns such as read-only access or full cluster lifecycle management.
+
+## Service Quotas
+
+Service quotas are enforced as part of the authorization flow. Before a mutating operation (e.g., creating a cluster) is authorized, the system checks that the request would not exceed the applicable quota for the AWS account and region. If the quota would be exceeded, the request is denied before it reaches the resource layer.
+
+Quotas are scoped to the same **(AWS account, region)** tenancy boundary as policies. Examples of quotas that may be enforced:
+
+- Maximum number of clusters per AWS account per region
+- Maximum number of node pools per cluster
+- Maximum number of policies or attachments per AWS account per region
+
+Quota limits, defaults, and override mechanisms are TBD.
 
 ## Data Storage
 
@@ -179,6 +191,8 @@ Policies can be attached at different levels of the IAM principal hierarchy:
 During policy evaluation, the system checks for policies attached to both the caller's exact ARN and, for assumed-role sessions, the parent role ARN. This allows broad role-level policies and narrow session-level overrides to coexist.
 
 ## ROSA Actions Reference
+
+> **Note:** The actions listed below are illustrative examples, not an exhaustive catalog. The definitive set of actions is defined in the Cedar schema and will evolve as the API surface grows.
 
 All actions use the `ROSA::Action` entity type in Cedar policies.
 
@@ -385,20 +399,20 @@ All `rosactl` commands authenticate via the local AWS credential chain (SigV4). 
 aws configure
 
 # 2. Link the AWS account (as Org Admin — requires RH token)
-rosactl account link --ocm-token <RH_TOKEN>
+rosactl account link --rh-token <RH_TOKEN>
 
 # 3. Create a Cedar policy
 rosactl policy create \
   --name DevClusterAccess \
   --description "Full access to development clusters" \
   --policy-file dev-cluster-access.cedar \
-  --ocm-token <RH_TOKEN>
+  --rh-token <RH_TOKEN>
 
 # 4. Attach the policy to an IAM role (recommended) or user
 rosactl policy attach \
   --policy-id <POLICY_ID> \
   --principal-arn arn:aws:iam::777788889999:role/DeveloperRole \
-  --ocm-token <RH_TOKEN>
+  --rh-token <RH_TOKEN>
 
 # 5. The IAM principal can now manage ROSA resources (no RH token needed)
 rosactl cluster create my-cluster
