@@ -22,9 +22,9 @@ flowchart TD
 
     B --> C{Is the AWS account<br/>linked to a RH org?}
 
-    C -->|No| D[If the request includes an RH token<br/>with Org Admin or an OCM role<br/>e.g. ROSAAdmin, the AWS account<br/>can be linked]
+    C -->|No| D[If the request includes a RH token<br/>with Org Admin or an OCM role<br/>e.g. ROSAAdmin, the AWS account<br/>can be linked]
 
-    C -->|Yes| E{Is an RH token present<br/>with Org Admin or<br/>OCM role e.g. ROSAAdmin?}
+    C -->|Yes| E{Is a RH token present<br/>with Org Admin or<br/>OCM role e.g. ROSAAdmin?}
     E -->|Yes| F[ALLOW<br/><i>Full administrative access<br/>within this AWS account</i>]
 
     E -->|No| G[Evaluate Cedar policies<br/>via Amazon Verified Permissions]
