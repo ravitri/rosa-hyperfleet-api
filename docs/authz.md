@@ -14,52 +14,81 @@ The authorization service provides fine-grained access control for ROSA operatio
 
 Identity is global: AWS IAM credentials identify the principal and AWS account, and each AWS account is linked to exactly one Red Hat organization. Policies and attachments are global: they are defined once and apply across all regions. Policy evaluation is regional: each region maintains its own AVP policy store, synced from the global source of truth. Policies can use `context.region` to restrict which regions they take effect in.
 
-## Authorization Flow
+## Authorization Flows
+
+### AWS Account Linking and IAM Principal Linking
+
+A Red Hat user with a valid RH token links the AWS account to the RH organization. This also links the calling IAM principal to the Red Hat user.
 
 ```mermaid
-flowchart TD
-    A[Incoming API Request] --> B[Extract Identity<br/><i>AWS IAM credentials → principal ARN + AWS account</i>]
+sequenceDiagram
+    actor Admin as IAM Principal + RH Token
+    participant API as ROSA HyperFleet API
+    participant DB as DynamoDB
 
-    B --> C{Is the AWS account<br/>linked to a RH org?}
-
-    C -->|No| D[If the request includes a RH token<br/>with Org Admin or an RBAC role<br/>e.g. ROSAAdmin, the AWS account<br/>can be linked]
-
-    C -->|Yes| E{Is the IAM principal linked<br/>to an RH user with Org Admin<br/>or RBAC role e.g. ROSAAdmin?}
-    E -->|Yes| F[ALLOW<br/><i>Full administrative access<br/>within this AWS account</i>]
-
-    E -->|No| G[Evaluate Cedar policies<br/>via Amazon Verified Permissions]
-
-    G --> H{Policy<br/>decision?}
-    H -->|Allow| I[ALLOW]
-    H -->|Deny| J[403 — Not authorized]
-
-    style D fill:#1a5276,color:#fff
-    style F fill:#2d6a2d,color:#fff
-    style I fill:#2d6a2d,color:#fff
-    style J fill:#8b1a1a,color:#fff
+    Admin->>API: account linking request
+    API->>API: Validate RH token (Org Admin or ROSAAdmin)
+    API->>DB: Store AWS account → RH org mapping
+    API->>DB: Store IAM principal → RH user mapping
+    API-->>Admin: Account and principal linked
 ```
 
-```text
-Request
-    |
-Extract Identity (AWS IAM credentials → principal ARN + AWS account)
-    |
-Account Linked Check
-    |-- Is the AWS account linked to an RH org? → continue
-    +-- Not linked → 403 "Account not linked"
-    |   (Linking requires an RH token with Org Admin or an RBAC role such as ROSAAdmin)
-    |
-Admin Check
-    |-- Is the IAM principal linked to a Red Hat user?
-    |-- Does the linked user hold Org Admin privileges or an RBAC role (e.g. ROSAAdmin)?
-    +-- All yes → ALLOW (full administrative access within this AWS account)
-    |
-AVP Authorization
-    |-- Build AVP IsAuthorized request for this principal
-    |-- Call AVP with the region's policyStoreId
-    +-- Return ALLOW/DENY based on AVP decision
-    |
-Handler
+### Policy Management and Attachment
+
+Policy management requires the AWS account to be linked. Access is granted either via principal linking (admin RH user) or via a Cedar policy that authorizes policy management actions.
+
+```mermaid
+sequenceDiagram
+    actor User as IAM Principal
+    participant API as ROSA HyperFleet API
+    participant DB as DynamoDB
+    participant AVP as Amazon Verified Permissions
+
+    User->>API: Policy management request (create, attach, etc.)
+    API->>DB: Is the AWS account linked?
+    alt Account not linked
+        API-->>User: 403 — Account not linked
+    end
+    API->>DB: Is the IAM principal linked to an admin RH user?
+    alt Linked to Org Admin or ROSAAdmin
+        API->>DB: Perform policy/attachment operation
+        API-->>User: Success
+    end
+    API->>AVP: Evaluate Cedar policies for this principal
+    alt Policy allows (e.g. ManagePolicies action)
+        API->>DB: Perform policy/attachment operation
+        API-->>User: Success
+    else Policy denies
+        API-->>User: 403 — Not authorized
+    end
+```
+
+### Regular Request Authorization
+
+All non-administrative API requests follow this flow. Linked admin principals are granted full access; all other principals are evaluated against Cedar policies.
+
+```mermaid
+sequenceDiagram
+    actor User as IAM Principal
+    participant API as ROSA HyperFleet API
+    participant DB as DynamoDB
+    participant AVP as Amazon Verified Permissions
+
+    User->>API: API request (e.g. create cluster)
+    API->>DB: Is the AWS account linked?
+    alt Account not linked
+        API-->>User: 403 — Account not linked
+    end
+    API->>DB: Is the IAM principal linked to an admin RH user?
+    alt Linked to Org Admin or ROSAAdmin
+        API-->>User: ALLOW — Full administrative access
+    end
+    API->>AVP: Evaluate Cedar policies for this principal
+    alt Policy allows
+        API-->>User: ALLOW
+    else Policy denies
+        API-->>User: 403 — Not authorized
+    end
 ```
 
 ## Access Levels
