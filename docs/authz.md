@@ -1,16 +1,16 @@
 # ROSA Authorization Service
 
-This document describes the Cedar/AVP-based authorization service for the ROSA Regional Frontend API.
+This document describes the Cedar/AVP-based authorization service for the ROSA HyperFleet API.
 
 ## Overview
 
 The authorization service provides fine-grained access control for ROSA operations using:
 
 - **AWS IAM** for authentication (all requests carry AWS IAM credentials)
-- **Red Hat account tokens** provided optionally for Org Admin and RBAC role verification
+- **Principal linking** — IAM principals can be linked to Red Hat users for administrative and policy management access
 - **Amazon Verified Permissions (AVP)** for policy evaluation
 - **Cedar** as the policy language
-- **DynamoDB** for storing account linkage
+- **DynamoDB** for storing account and principal linkage
 
 Identity is global: AWS IAM credentials identify the principal and AWS account, and each AWS account is linked to exactly one Red Hat organization. Policies and attachments are global: they are defined once and apply across all regions. Policy evaluation is regional: each region maintains its own AVP policy store, synced from the global source of truth. Policies can use `context.region` to restrict which regions they take effect in.
 
@@ -24,7 +24,7 @@ flowchart TD
 
     C -->|No| D[If the request includes a RH token<br/>with Org Admin or an RBAC role<br/>e.g. ROSAAdmin, the AWS account<br/>can be linked]
 
-    C -->|Yes| E{Is a RH token present<br/>with Org Admin or<br/>RBAC role e.g. ROSAAdmin?}
+    C -->|Yes| E{Is the IAM principal linked<br/>to an RH user with Org Admin<br/>or RBAC role e.g. ROSAAdmin?}
     E -->|Yes| F[ALLOW<br/><i>Full administrative access<br/>within this AWS account</i>]
 
     E -->|No| G[Evaluate Cedar policies<br/>via Amazon Verified Permissions]
@@ -49,9 +49,9 @@ Account Linked Check
     +-- Not linked → 403 "Account not linked"
     |   (Linking requires an RH token with Org Admin or an RBAC role such as ROSAAdmin)
     |
-Admin Check (when RH token is present)
-    |-- Is the RH token valid?
-    |-- Does the user hold Org Admin privileges or an RBAC role (e.g. ROSAAdmin)?
+Admin Check
+    |-- Is the IAM principal linked to a Red Hat user?
+    |-- Does the linked user hold Org Admin privileges or an RBAC role (e.g. ROSAAdmin)?
     +-- All yes → ALLOW (full administrative access within this AWS account)
     |
 AVP Authorization
@@ -64,27 +64,35 @@ Handler
 
 ## Access Levels
 
-**Administrative access** is granted when the request includes a valid Red Hat account token and the associated user holds either:
+**Administrative access** is granted when the IAM principal is linked to a Red Hat user who holds either:
 
 - **Organization Administrator** privileges — global scope, applies to all regions.
-- An applicable **RBAC role** such as `ROSAAdmin` — currently global scope; regional scoping is under evaluation.
+- An applicable **RBAC role** such as `ROSAAdmin` — global scope.
 
 Admin access grants full permissions within the linked AWS account, including policy and attachment management.
 
 **Regular IAM principals** — all other callers. Access is determined by Cedar policies evaluated via AVP, attached directly to the principal's ARN.
 
-> **Note:** Policy management is not restricted to administrative users. A regular IAM principal can be granted a Cedar policy that authorizes policy and attachment management (e.g., via a `ManagePolicies` action). This allows delegated policy administration without requiring an RH token or RBAC role.
+> **Note:** Policy management is not restricted to administrative users. A regular IAM principal can be granted a Cedar policy that authorizes policy and attachment management (e.g., via a `ManagePolicies` action). This allows delegated policy administration without requiring principal linking or an RBAC role.
+
+Policy management operates at global scope — both for RH administrators and for IAM principals with delegated policy management permissions. Because policies and attachments are global, restricting an administrator to a single region would be inconsistent: a regionally-scoped admin who creates a policy would lose management authority over it if that policy is later updated to apply across multiple regions. For this reason, HyperFleet does not support regionally-scoped policy administrators.
+
+## Principal Linking
+
+IAM principals can be linked to a Red Hat user via `rosactl link account` (which also links the AWS account to the RH organization) or `rosactl link principal` (which links only the calling IAM principal). Multiple IAM principals can be linked to the same Red Hat user.
+
+Principal linking grants administrative access when the linked Red Hat user holds Org Admin privileges or an RBAC role such as `ROSAAdmin`. This is the mechanism by which RH administrators gain full permissions — including policy and attachment management — without requiring a Cedar policy. Principal linking is not required for IAM principals whose access is determined solely by Cedar policies, including Cedar-based delegated policy management.
 
 ## Tenancy and Scoping
 
-Since each AWS account maps to exactly one Red Hat organization (many-to-one: one RH org can have many AWS accounts), the RH org is implicit in the AWS account.
+Each AWS account maps to exactly one Red Hat organization (many-to-one: one RH org can have many AWS accounts).
 
 | Scope | What |
 | --- | --- |
-| **Global** | AWS IAM identity, AWS account → RH org mapping, RH Org Admin status, RBAC role assignments, Cedar policies, policy attachments |
+| **Global** | AWS IAM identity, AWS account → RH org mapping, IAM principal → RH user mapping, RH Org Admin status, RBAC role assignments, Cedar policies, policy attachments |
 | **Regional (per AWS account, per region)** | Policy evaluation (AVP policy stores), ROSA resources (clusters, node pools, access entries) |
 
-Policies and attachments are defined globally — a policy created from any region is available everywhere. Each region maintains its own AVP policy store, synced from the global source of truth via DynamoDB Global Tables and DynamoDB Streams. To restrict a policy to specific regions, use `context.region` conditions in Cedar (see [Policy Examples](#policy-examples)).
+Policies and attachments are defined globally — a policy created from any region is available everywhere. Each region maintains its own AVP policy store, synced from the global source of truth via DynamoDB Global Tables. To restrict a policy to specific regions, use `context.region` conditions in Cedar (see [Policy Examples](#policy-examples)).
 
 Resources are regional — a cluster in `us-east-1` is not visible in `eu-west-1`. A principal operating in one AWS account cannot see or affect resources in a different AWS account.
 
@@ -104,28 +112,17 @@ By default, newly linked AWS accounts grant **no permissions** to any IAM princi
 
 Organization Administrators can attach managed policies to all IAM principals in the AWS account. For example, one available managed policy grants each principal permission to view all clusters in the AWS account and manage their own — reproducing the default behavior of the V1 API. Other managed policies will cover common patterns such as read-only access or full cluster lifecycle management.
 
-## Service Quotas
-
-Service quotas are enforced as part of the authorization flow. Before a mutating operation (e.g., creating a cluster) is authorized, the system checks that the request would not exceed the applicable quota for the AWS account and region. If the quota would be exceeded, the request is denied before it reaches the resource layer.
-
-Quotas are scoped to the same **(AWS account, region)** tenancy boundary as policies. Examples of quotas that may be enforced:
-
-- Maximum number of clusters per AWS account per region
-- Maximum number of node pools per cluster
-- Maximum number of policies or attachments per AWS account (global)
-
-Quota limits, defaults, and override mechanisms are TBD.
-
 ## Data Storage
 
 | Entity | Storage | Scope |
 | --- | --- | --- |
 | AWS account → RH org mapping | DynamoDB Global Tables | Global |
+| IAM principal → RH user mapping | DynamoDB Global Tables | Global |
 | Policy templates | DynamoDB Global Tables | Global |
 | Attachments | DynamoDB Global Tables | Global |
 | Policy evaluation | AVP IsAuthorized API | Regional (per AWS account, per region) |
 
-DynamoDB Global Tables are the source of truth for policies and attachments, replicated across all regions. Each region runs a sync worker (triggered by DynamoDB Streams) that resolves policy templates and pushes them to the local AVP policy store. AVP is used only for evaluation — it is a regional cache, not the source of truth.
+DynamoDB Global Tables are the source of truth for policies and attachments, replicated across all regions within seconds. AVP is used only for evaluation — it is a regional cache, not the source of truth.
 
 ## API Endpoints
 
@@ -411,28 +408,28 @@ Context attributes are passed alongside each AVP authorization request and can b
 
 All `rosactl` commands authenticate via the local AWS credential chain (SigV4). The AWS account ID and region are derived from the caller's AWS configuration automatically. The region can be overridden with the `--region` flag.
 
+### Initial Bootstrap
+
+The user executing this flow is either a Red Hat Org Admin or holds a role in the Platform RBAC service such as `ROSAAdmin`. The user has a valid Red Hat account token (RH token).
+
 ```bash
 # 1. Configure AWS credentials and region
 aws configure
 
-# 2. Link the AWS account (as Org Admin — requires RH token)
-rosactl account link --rh-token <RH_TOKEN>
+# 2. Links the AWS account (as Admin — requires RH token)
+# It also links the IAM principal to the Red Hat User.
+rosactl link account --rh-token <RH_TOKEN>
 
 # 3. Create a Cedar policy
 rosactl policy create \
   --name DevClusterAccess \
   --description "Full access to development clusters" \
-  --policy-file dev-cluster-access.cedar \
-  --rh-token <RH_TOKEN>
+  --policy-file dev-cluster-access.cedar
 
 # 4. Attach the policy to an IAM role (recommended) or user
 rosactl policy attach \
   --policy-id <POLICY_ID> \
-  --principal-arn arn:aws:iam::777788889999:role/DeveloperRole \
-  --rh-token <RH_TOKEN>
-
-# 5. The IAM principal can now manage ROSA resources (no RH token needed)
-rosactl cluster create my-cluster
+  --principal-arn arn:aws:iam::777788889999:role/DeveloperRole
 ```
 
 Where `dev-cluster-access.cedar` contains:
@@ -444,6 +441,48 @@ permit(
   resource
 )
 when { resource.tags["Environment"] == "development" };
+```
+
+### Policy Management for additional Red Hat admins
+
+The user executing this flow is either a Red Hat Org Admin or holds a role in the Platform RBAC service such as `ROSAAdmin`. The user has a valid Red Hat account token (RH token).
+
+```bash
+# 1. Configure AWS credentials and region
+aws configure
+
+# 2. Links the IAM principal to the Red Hat User.
+# Note that several IAM principals can be linked to
+# the same Red Hat user.
+rosactl link principal --rh-token <RH_TOKEN>
+
+# 3. Create a Cedar policy
+rosactl policy create \
+  --name DevClusterAccess \
+  --description "Full access to development clusters" \
+  --policy-file dev-cluster-access.cedar
+
+# 4. Attach the policy to an IAM role (recommended) or user
+rosactl policy attach \
+  --policy-id <POLICY_ID> \
+  --principal-arn arn:aws:iam::777788889999:role/DeveloperRole
+```
+
+### Regular user access
+
+In this example the principal is `arn:aws:iam::777788889999:role/DeveloperRole` from the example above.
+
+Note that regular users do not have to run `rosactl link principal`. Their permissions must be explicitly granted within HyperFleet itself by Red Hat admins (see examples above).
+
+```bash
+# 1. Configure AWS credentials and region
+aws configure
+
+# 2. List clusters
+rosactl cluster list
+
+# 3. Create a cluster
+rosactl cluster create my-cluster
 ```
 
 ## Further Reading
